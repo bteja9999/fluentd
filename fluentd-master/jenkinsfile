@@ -1,0 +1,111 @@
+K8_CLUSTER_NAME=[
+    'dc15-dev-cluster',
+    'ch03-dev-cluster',
+    'rancher-dev.neustar.net',
+    'dc15-nonprd-c1',
+    'ch03-nonprd-c1',
+    'rancher-prod.neustar.net',
+    'dc15-prd-c1',
+    'ch03-prd-c1'].join("\n")
+
+pipeline {
+  agent {
+    kubernetes {
+      yaml """\
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          labels: 
+            label: label
+        spec:
+          containers:
+          - name: gcloud
+            image: gcr.io/cloud-builders/gcloud
+            command:
+            - cat
+            tty: true
+        """.stripIndent()
+    }
+  }
+  parameters {
+    listGitBranches(
+            name: 'BRANCH',
+            description: "The branch of fluentd git lab repository",
+            type: 'BRANCH',
+            branchFilter: 'refs/heads/(.*)',
+            defaultValue: 'CIOIE-1686',
+            sortMode: 'DESCENDING_SMART',
+            selectedValue: 'DEFAULT',
+            remoteURL: 'ssh://git@git.nexgen.neustar.biz:8022/onedev/iac/cmf/logmon/fluentd.git',
+            credentialsId: 'jenkins-gitlab')
+    choice(
+            name: 'K8_CLUSTER_NAME',
+            choices: "${K8_CLUSTER_NAME}",
+            description: "Kubernetes CLUSTER  Name")
+    string(
+            name: 'HELM_CHART_VALUES',
+            defaultValue: '',
+            description: 'Set Helm Chart Values. (eg., "--set clusterName=dc15-dev-cluster  --set logstash.primary.host=dc15-fs-dev-logstashfw-425.neustar.net  --set logstash.standby.host=dc15-fs-dev-logstashfw-426.neustar.net" )')
+    booleanParam(
+            name: 'UPGRADE',
+            defaultValue: 'true',
+            description: 'Whether to run helm upgrade.')
+  }
+  environment {
+    KUBECONFIG_CREDS=getKubeconfig("${params.K8_CLUSTER_NAME}")
+    UPGRADE="${params.UPGRADE}"
+    HELM_CHART_VALUES="${params.HELM_CHART_VALUES}"
+  }
+  stages {
+    stage('Install Helm'){
+      steps {
+        container('gcloud') {
+          sh '''
+            curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+            chmod 700 get_helm.sh
+            ./get_helm.sh
+            helm version
+          '''    
+        }
+      }
+    } 
+    stage('Deploy Fluentd') {
+      environment {
+          KUBECONFIG=credentials("${KUBECONFIG_CREDS}")
+      }
+      steps {
+         container('gcloud') {
+            sh '''
+               kubectl config view
+               kubectl get pods -n fluentd
+               if [ ${UPGRADE} = "true" ]; then
+                 helm upgrade -i fluentd . -n fluentd ${HELM_CHART_VALUES}
+                 sleep 15
+                 kubectl get pods -n fluentd
+               fi
+            '''
+         }  
+      }
+    }
+  }
+}
+
+def getKubeconfig(clusterName) {
+   if("ch03-dev-cluster" == clusterName) {
+        return "rancher-dev_logmon-sa_ch03-dev-cluster";
+    } else if ("rancher-dev.neustar.net" == clusterName) {
+        return "rancher-dev_logmon-sa_local-dev-cluster";
+    } else if("dc15-nonprd-c1"  == clusterName) {
+        return "kubeconfig_rancher-dev_logmon-sa_dc15-nonprod-cluster";
+    } else if ("ch03-nonprd-c1" == clusterName) {
+        return "rancher-dev_logmon-sa_ch03-nonprod-cluster";
+    } else if("dc15-prd-c1" == clusterName) {
+        return "rancher-dev_logmon-sa_dc15-prod-cluster";
+    } else if ("ch03-prd-c1" == clusterName) {
+        return "rancher-dev_logmon-sa_ch03-prod-cluster";
+    } else if ("rancher-prod.neustar.net" == clusterName) {
+        return "rancher-prod_logmon-sa_local-prod-cluster";
+    } else {
+      return "rancher-dev_logmon-sa_dc15-dev-cluster";
+    }
+}
